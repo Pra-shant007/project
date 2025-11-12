@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Training Coach with Video Feedback</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f8ff; /* Light blue for fitness theme */
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        h1 {
+            color: #007BFF; /* Blue accent */
+            margin-bottom: 10px;
+        }
+        #container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border: 2px solid #007BFF;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #feedback {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 18px;
+            min-width: 200px;
+        }
+        #summary {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 0;
+            width: 100%;
+            max-width: 640px;
+        }
+        button, select {
+            padding: 10px 20px;
+            margin: 10px;
+            background: #28A745; /* Green for start */
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #218838;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .error { color: #DC3545; } /* Red for errors */
+        .good { color: #28A745; } /* Green for good */
+        #instructions {
+            max-width: 640px;
+            text-align: left;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Virtual Training Coach with Video Feedback</h1>
+    <p>Real-time form correction via computer vision. Stand in front of your camera and select an exercise.</p>
+
+    <div id="container">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+        <div id="feedback">Ready to start? Select an exercise!</div>
+    </div>
+
+    <div>
+        <label for="exercise">Exercise:</label>
+        <select id="exercise">
+            <option value="squats">Squats</option>
+            <!-- Add more: <option value="pushups">Push-ups</option> -->
+        </select>
+        <button id="startBtn">Start Coaching</button>
+        <button id="stopBtn" disabled>Stop</button>
+    </div>
+
+    <div id="summary">
+        <h3>Performance Summary</h3>
+        <p>Reps Completed: <span id="reps">0</span></p>
+        <p>Errors Detected: <span id="errors">0</span></p>
+        <p>Status: <span id="status">Idle</span></p>
+    </div>
+
+    <div id="instructions">
+        <h3>Instructions</h3>
+        <ul>
+            <li>Ensure good lighting and face the camera directly (full body visible).</li>
+            <li>For squats: Keep feet shoulder-width, lower until thighs parallel to ground, back straight.</li>
+            <li>Feedback will alert on errors like knee cave-in or rounded back.</li>
+            <li>Reset summary by stopping and restarting.</li>
+        </ul>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const feedback = document.getElementById('feedback');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const exerciseSelect = document.getElementById('exercise');
+        const repsEl = document.getElementById('reps');
+        const errorsEl = document.getElementById('errors');
+        const statusEl = document.getElementById('status');
+
+        // MediaPipe Pose setup
+        const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`});
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        pose.onResults(onResults);
+
+        // State variables
+        let camera, animationId;
+        let isCoaching = false;
+        let reps = 0;
+        let errors = 0;
+        let lastHipY = null; // For rep counting
+        let errorCooldown = 0; // Prevent spam feedback
+        let audioContext; // For beep sound
+
+        // Initialize camera
+        async function initCamera() {
+            const stream = await navigator.mediaDevices.getUser Media({ video: true });
+            video.srcObject = stream;
+            camera = new Camera(video, {
+                onFrame: async () => {
+                    await pose.send({image: video});
+                },
+                width: 640,
+                height: 480
+            });
+            camera.start();
+        }
+
+        // Draw pose on canvas
+        function onResults(results) {
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+            if (results.poseLandmarks) {
+                drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                drawLandmarks(ctx, results.poseLandmarks, {color: '#FF0000', lineWidth: 1, radius: 2});
+
+                if (isCoaching) {
+                    detectErrors(results.poseLandmarks);
+                }
+            }
+            ctx.restore();
+        }
+
+        // Simple error detection for squats (extend for other exercises)
+        function detectErrors(landmarks) {
+            const leftShoulder = landmarks[11]; // Landmark indices from MediaPipe
+            const rightShoulder = landmarks[12];
+            const leftHip = landmarks[23];
+            const rightHip = landmarks[24];
+            const leftKnee = landmarks[25];
+            const rightKnee = landmarks[26];
+            const leftAnkle = landmarks[27];
+            const rightAnkle = landmarks[28];
+
+            // Normalize to canvas coords (MediaPipe returns 0-1 normalized)
+            const scaleX = canvas.width;
+            const scaleY = canvas.height;
+
+            // Back straight check: Shoulder-hip angle (simple vector dot product proxy)
+            const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2 * scaleX;
+            const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2 * scaleY;
+            const hipMidX = (leftHip.x + rightHip.x) / 2 * scaleX;
+            const hipMidY = (leftHip.y + rightHip.y) / 2 * scaleY;
+            const backAngle = Math.atan2(hipMidY - shoulderMidY, hipMidX - shoulderMidX) * 180 / Math.PI;
+            const isBackStraight = Math.abs(backAngle) < 10; // Threshold for straight back
+
+            // Knee alignment: Check if knees are outward from ankles (anti-cave)
+            const leftKneeAlign = (leftKnee.x - leftAnkle.x) * scaleX > 0; // Simplified
+            const rightKneeAlign = (rightKnee.x - rightAnkle.x) * scaleX < 0;
+            const kneesAligned = leftKneeAlign && rightKneeAlign;
+
+            // Rep counting: Hip height threshold for squat (down < 0.6 normalized Y)
+            const hipAvgY = (leftHip.y + rightHip.y) / 2;
+            if (lastHipY !== null) {
+                if (lastHipY > 0.6 && hipAvgY < 0.6) reps++; // Up to down = rep
+                repsEl.textContent = reps;
+            }
+            lastHipY = hipAvgY;
+
+            // Feedback logic
+            let message = 'Good form!';
+            let isError = false;
+            if (!isBackStraight) {
+                message = 'Straighten your back!';
+                isError = true;
+            } else if (!kneesAligned) {
+                message = 'Keep knees aligned (no cave-in)!';
+                isError = true;
+            }
+            statusEl.textContent = message;
+            statusEl.className = isError ? 'error' : 'good';
+
+            if (isError && errorCooldown <= 0) {
+                errors++;
+                errorsEl.textContent = errors;
+                showFeedback(message, isError);
+                playBeep(); // Audio alert
+                errorCooldown = 60; // Cooldown frames (~2s at 30fps)
+            }
+            if (errorCooldown > 0) errorCooldown--;
+        }
+
+        // Show overlay feedback
+        function showFeedback(msg, isError) {
+            feedback.textContent = msg;
+            feedback.style.color = isError ? '#DC3545' : '#28A745';
+            feedback.style.background = isError ? 'rgba(220, 53, 69, 0.7)' : 'rgba(40, 167, 69, 0.7)';
+        }
+
+        // Simple beep sound
+        function playBeep() {
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.frequency.value = 800; // Hz
+            oscillator.type = 'sine';
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.5);
+        }
+
+        // Event listeners
+        startBtn.addEventListener('click', async () => {
+            if (!camera) await initCamera();
+            isCoaching = true;
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            feedback.textContent = `Coaching for ${exerciseSelect.value}. Start exercising!`;
+            statusEl.textContent = 'Active';
+        });
+
+        stopBtn.addEventListener('click', () => {
+            isCoaching = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            reps = 0;
+            errors = 0;
+            lastHipY = null;
+            repsEl.textContent = 0;
+            errorsEl.textContent = 0;
+            statusEl.textContent = 'Stopped';
+            feedback.textContent = 'Session ended. Reset and start again!';
+            if (camera) camera.stop();
+        });
+
+        exerciseSelect.addEventListener('change', () => {
+            if (isCoaching) {
+                alert('Stop current session before changing exercise.');
+            }
+        });
+
+        // Auto-start camera on load if button clicked, but init on demand
+        window.addEventListener('load', () => {
+            canvas.width = 640;
+            canvas.height = 480;
+        });
+    </script>
+</body>
+</html>

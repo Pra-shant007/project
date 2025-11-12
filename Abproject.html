@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Training Coach with Video Feedback</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f8ff;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        h1 { color: #007BFF; margin-bottom: 10px; }
+        #loginForm { background: #e9ecef; padding: 20px; border-radius: 10px; margin: 20px 0; width: 300px; }
+        #loginForm input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; }
+        #container { position: relative; width: 640px; height: 480px; border: 2px solid #007BFF; border-radius: 10px; overflow: hidden; margin: 20px 0; }
+        #video { width: 100%; height: 100%; object-fit: cover; }
+        #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #feedback { position: absolute; top: 10px; left: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 10px; border-radius: 5px; font-size: 18px; min-width: 200px; }
+        #summary { background: #e9ecef; padding: 15px; border-radius: 10px; margin: 10px 0; width: 100%; max-width: 640px; }
+        button, select, input[type="submit"] { padding: 10px 20px; margin: 10px; background: #28A745; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        button:hover, input[type="submit"]:hover { background: #218838; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        .error { color: #DC3545; }
+        .good { color: #28A745; }
+        #instructions, #history { max-width: 640px; text-align: left; margin: 20px 0; }
+        #history table { width: 100%; border-collapse: collapse; }
+        #history th, #history td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        #history th { background: #007BFF; color: white; }
+        #chartContainer { width: 640px; height: 300px; margin: 20px 0; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <!-- Login/Register Form -->
+    <div id="loginForm">
+        <h2>Login / Register</h2>
+        <input type="email" id="email" placeholder="Email" required>
+        <input type="password" id="password" placeholder="Password" required>
+        <input type="submit" id="registerBtn" value="Register">
+        <input type="submit" id="loginBtn" value="Login">
+        <p id="authError" style="color: red;"></p>
+    </div>
+
+    <!-- Main App (hidden until logged in) -->
+    <div id="mainApp" class="hidden">
+        <h1>Virtual Training Coach with Video Feedback</h1>
+        <p>Real-time form correction via computer vision. Stand in front of your camera and select an exercise.</p>
+
+        <div id="container">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="canvas"></canvas>
+            <div id="feedback">Ready to start? Select an exercise!</div>
+        </div>
+
+        <div>
+            <label for="exercise">Exercise:</label>
+            <select id="exercise">
+                <option value="squats">Squats</option>
+            </select>
+            <button id="startBtn">Start Coaching</button>
+            <button id="stopBtn" disabled>Stop & Save Session</button>
+            <button id="viewHistoryBtn">View History</button>
+        </div>
+
+        <div id="summary">
+            <h3>Current Session</h3>
+            <p>Reps: <span id="reps">0</span> | Errors: <span id="errors">0</span> | Status: <span id="status">Idle</span></p>
+            <p>Duration: <span id="duration">0</span>s</p>
+        </div>
+
+        <div id="instructions">
+            <h3>Instructions</h3>
+            <ul>
+                <li>Ensure good lighting and face the camera directly (full body visible).</li>
+                <li>For squats: Keep feet shoulder-width, lower until thighs parallel to ground, back straight.</li>
+                <li>Feedback will alert on errors like knee cave-in or rounded back.</li>
+                <li>Click "Stop & Save Session" to save to your dashboard.</li>
+            </ul>
+        </div>
+
+        <div id="history" class="hidden">
+            <h3>Workout History</h3>
+            <div id="chartContainer">
+                <canvas id="historyChart"></canvas>
+            </div>
+            <table id="historyTable">
+                <thead><tr><th>Date</th><th>Exercise</th><th>Reps</th><th>Errors</th><th>Duration (s)</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Backend API base URL
+        const API_BASE = 'http://localhost:5000/api';
+
+        // Auth variables
+        let token = localStorage.getItem('token');
+        let userId = localStorage.getItem('user_id');
+        const loginForm = document.getElementById('loginForm');
+        const mainApp = document.getElementById('mainApp');
+        const authError = document.getElementById('authError');
+
+        // Check if already logged in
+        if (token && userId) {
+            loginForm.classList.add('hidden');
+            mainApp.classList.remove('hidden');
+
+        // Auth functions
+        async function registerUser () {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            try {
+                const res = await fetch(`${API_BASE}/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    localStorage.setItem('token', data.token);
+                    localStorage.setItem('user_id', data.user_id);
+                    token = data.token;
+                    userId = data.user_id;
+                    loginForm.classList.add('hidden');
+                    mainApp.classList.remove('hidden');
+                    authError.textContent = '';
+                } else {
+                    authError.textContent = data.error;
+                }
+            } catch (err) {
+                authError.textContent = 'Error: ' + err.message;
+            }
+        }
+
+        async function loginUser () {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            try {
+                const res = await fetch(`${API_BASE}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    localStorage.setItem('token', data.token);
+                    localStorage.setItem('user_id', data.user_id);
+                    token = data.token;
+                    userId = data.user_id;
+                    loginForm.classList.add('hidden');
+                    mainApp.classList.remove('hidden');
+                    authError.textContent = '';
+                } else {
+                    authError.textContent = data.error;
+                }
+            } catch (err) {
+                authError.textContent = 'Error: ' + err.message;
+            }
+        }
+
+        document.getElementById('registerBtn').addEventListener('click', registerUser );
+        document.getElementById('loginBtn').addEventListener('click', loginUser );
+
+        // Rest of the script (MediaPipe, etc.) - same as before, with additions below
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const feedback = document.getElementById('feedback');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const exerciseSelect = document.getElementById('exercise');
+        const reps
